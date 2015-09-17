@@ -1,8 +1,8 @@
 #include "common.h"
 
 int
-main()
+main(int argc, char* argv[])
 {
-  printf("Hello world\n");
+	TBD();
 	return 0;
 }
