@@ -14,12 +14,11 @@
 int
 main(int argc, char *argv[])
 {
-	int fd;
+	int fd;  
 	void *addr;
 	struct stat sb;
 	struct wc *wc;
-	struct mallinfo minfo;
-
+	struct mallinfo minfo;	
 	if (argc != 2) {
 		fprintf(stderr, "Usage: %s filename\n", argv[0]);
 		exit(1);
@@ -43,8 +42,6 @@ main(int argc, char *argv[])
 	}
 	/* close the file */
 	close(fd);
-
-
 	/* note that the array addr is read only, and cannot be modified. */
 	wc = wc_init(addr, sb.st_size);
 	/* unmap the word array so it is no longer accessible */
