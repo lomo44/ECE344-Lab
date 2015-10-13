@@ -148,7 +148,23 @@ thread_create(void (*fn) (void *), void *parg)
 	return new_thread->m_iID;
 }
 
-
+/*int thread_stackrealloc(thread* _thread)
+{
+	unsigned long current_sp = _thread->m_pContext->uc_mcontext.gregs[REG_RSP];
+	unsigned long base_sp = (unsigned long )(_thread->m_pContext->uc_stack.ss_sp);
+	unsigned long offsetdown_sp = current_sp - base_sp;
+	unsigned long offsetup_sp = base_sp + _thread->m_pContext->uc_stack.ss_size - base_sp;
+	// check if offset is too small;
+	if(offset_sp <= 512)
+	{
+		void* newstack = realloc(_thread->m_pContext->uc_stacl.ss_sp);
+	}
+	else
+	{
+		// no reallocation occurred
+		return 0;
+	}
+}*/
 
 Tid
 thread_yield(Tid want_tid)
@@ -543,11 +559,12 @@ void Queue_free(Queue* _queue)
 	else
 	{
 		Single_Linker* start_linker = _queue->m_pStartLinker;
+		Single_Linker* prior_linker = NULL;
 		for(;start_linker != NULL;)
 		{
-			Single_Linker* prior_linker = start_linker->m_pNextLinker;
-			free(prior_linker);
+			prior_linker = start_linker;
 			start_linker = start_linker->m_pNextLinker;
+			free(prior_linker);
 		}
 		free(_queue);
 		return;
