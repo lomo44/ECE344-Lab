@@ -297,6 +297,7 @@ test_preemptive()
 		potato_tids[ii] =
 			thread_create((void (*)(void *))do_potato, (void *)ii);
 		assert(thread_ret_ok(potato_tids[ii]));
+        assert(interrupts_enabled());
 	}
 
 	spin(DURATION);

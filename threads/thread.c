@@ -6,12 +6,12 @@
 #include "thread.h"
 #include "interrupt.h"
 
-
 // Single Linker, used for single-linked linked list
 typedef struct Single_Linker{
 	void *m_pPointer;
 	struct Single_Linker* m_pNextLinker;
 }Single_Linker;
+
 
 // Queue
 typedef struct Queue{
@@ -21,10 +21,17 @@ typedef struct Queue{
 }Queue;
 
 typedef enum eThreadStatus{
+    eThreadNew,
 	eThreadRun,
 	eThreadIdle,
 	eThreadExit,
+    eThreadSleep
 }eThreadStatus;
+
+typedef enum eMutexStatus{
+    eMutexLocked,
+    eMutexFree
+}eMutexStatus;
 
 // Queue Function
 Queue* 		Queue_new							();
@@ -49,11 +56,14 @@ typedef struct thread thread;
 // Global Ready queue for threads, top thread of the ready queue
 // is the thread that is running
 Queue* thread_ReadyQueue = NULL;
+// Global exit queue for threads
 Queue* thread_ExitQueue = NULL;
+
+
 thread* thread_ReadyQueue_index[THREAD_MAX_THREADS] = {NULL};
 
 Tid thread_exit(Tid tid);
-Tid thread_yield(Tid tid);
+Tid thread_yield(Tid tid);	
 
 void
 thread_init(void)
@@ -70,7 +80,8 @@ thread_init(void)
 	newthread->m_pStack = NULL;
 	thread_ReadyQueue_index[newthread->m_iID] = newthread;
 	Queue_push(thread_ReadyQueue,newthread);
-	getcontext(newcontext);	
+	getcontext(newcontext);
+    // Enable interrupt handler
 	return;
 }
 
@@ -89,6 +100,7 @@ thread_id()
 
 void thread_stub(void (*fn) (void*), void* parg)
 {
+    interrupts_set(1);
 	Tid ret;
 	//printf("Enter Stub\n");
 	fn(parg);
@@ -100,13 +112,16 @@ void thread_stub(void (*fn) (void*), void* parg)
 Tid
 thread_create(void (*fn) (void *), void *parg)
 {
+    //printf("called creat\n");
+    int interrupt_enabled = interrupts_set(0);
 	ucontext_t* new_context = (ucontext_t*)malloc(sizeof(ucontext_t));
 	thread* new_thread = (thread*)malloc(sizeof(thread));
 	if(new_thread == NULL || new_context == NULL)
 	{
-	        return THREAD_NOMEMORY;
 		free(new_context);
 		free(new_thread);
+        interrupts_set(interrupt_enabled);
+        return THREAD_NOMEMORY;
 	}
 	new_thread->m_pContext = new_context;
 	getcontext(new_context);
@@ -116,16 +131,20 @@ thread_create(void (*fn) (void *), void *parg)
 		if (thread_ReadyQueue_index[counter]==NULL)
 		{
 			new_thread->m_iID = counter;
-			new_thread->m_eThreadStatus = eThreadIdle;
+			new_thread->m_eThreadStatus = eThreadNew;
 			thread_ReadyQueue_index[counter] = new_thread;
-			void* new_stack = malloc(3 * THREAD_MIN_STACK);
+			void* new_stack = malloc(3 * THREAD_MIN_STACK+16);
+            new_stack =(void*)(((unsigned long) new_stack+16) &(unsigned long)(~0xF));
+            new_stack = (void*)((unsigned long)new_stack - 8);
 			if(new_stack == NULL)
 			{
 			  free(new_stack);
 			  free(new_context);
 			  free(new_thread);
+              interrupts_set(interrupt_enabled);
 			  return THREAD_NOMEMORY;
 			}
+			// Assign value to new context
 			new_thread->m_pStack = new_stack;
 			new_context->uc_stack.ss_sp = new_stack;
 			new_context->uc_stack.ss_flags = 0;
@@ -137,42 +156,53 @@ thread_create(void (*fn) (void *), void *parg)
 			new_context->uc_mcontext.gregs[REG_RDI] = (long int)fn;
 			new_context->uc_mcontext.gregs[REG_RSI] = (long int)parg;
 			// Allocating new stack for the thread
-
 			Queue_push(thread_ReadyQueue,new_thread);
+            interrupts_set(interrupt_enabled);
 			return new_thread->m_iID;
 		}
 	}
-	if(counter == THREAD_MAX_THREADS)	{ 
+	if(counter == THREAD_MAX_THREADS)	{
+        interrupts_set(interrupt_enabled);
 		return THREAD_NOMORE;
 	}
+    interrupts_set(interrupt_enabled);
 	return new_thread->m_iID;
 }
 
-/*int thread_stackrealloc(thread* _thread)
+int thread_stackrealloc(thread* _thread)
 {
-	unsigned long current_sp = _thread->m_pContext->uc_mcontext.gregs[REG_RSP];
-	unsigned long base_sp = (unsigned long )(_thread->m_pContext->uc_stack.ss_sp);
-	unsigned long offsetdown_sp = current_sp - base_sp;
-	unsigned long offsetup_sp = base_sp + _thread->m_pContext->uc_stack.ss_size - base_sp;
-	// check if offset is too small;
-	if(offset_sp <= 512)
+    unsigned long current_sp = _thread->m_pContext->uc_mcontext.gregs[REG_RSP];
+	unsigned long base_sp = (unsigned long)(_thread->m_pContext->uc_stack.ss_sp);
+	unsigned long distance = current_sp-base_sp;
+	// check if the stack is running out
+	if(current_sp - base_sp  <= 512)
 	{
-		void* newstack = realloc(_thread->m_pContext->uc_stacl.ss_sp);
+		// Reallocating stack;
+		unsigned long new_size = _thread->m_pContext->uc_stack.ss_size*2;
+		void* new_stack = malloc(new_size);
+        void* new_stack_p = (void*)(((unsigned long)new_stack + (unsigned long)(new_size >> 1)));
+		memcpy(new_stack_p,_thread->m_pContext->uc_stack.ss_sp,new_size*0.5);
+		current_sp = (unsigned long)(new_stack)+new_size*0.5+distance;
+		_thread->m_pContext->uc_mcontext.gregs[REG_RSP] = current_sp; 
+		_thread->m_pContext->uc_stack.ss_sp = new_stack;
+		_thread->m_pContext->uc_stack.ss_size = new_size;
+		return 1;
 	}
 	else
 	{
-		// no reallocation occurred
 		return 0;
 	}
-}*/
+}
 
 Tid
 thread_yield(Tid want_tid)
 {
-  					assert(thread_ReadyQueue->m_pEndLinker->m_pNextLinker==NULL);
-
+    int interrupt_enabled = interrupts_set(0);
+    //printf("Called Yield\n");
+    assert(thread_ReadyQueue->m_pEndLinker->m_pNextLinker==NULL);
   	if(want_tid < THREAD_SELF)	
 	{
+        interrupts_set(interrupt_enabled);
 		return THREAD_INVALID;
 	}
 	else
@@ -180,6 +210,7 @@ thread_yield(Tid want_tid)
 		// Yield myself
 		if(want_tid == THREAD_SELF)
 		{
+            interrupts_set(interrupt_enabled);
 			return ((thread*)Queue_top(thread_ReadyQueue))->m_iID;
 		}
 		// Yield to anybody
@@ -187,25 +218,31 @@ thread_yield(Tid want_tid)
 		{
 			if(thread_ReadyQueue->m_iSize == 1)
 			{
+                interrupts_set(interrupt_enabled);
 				return THREAD_NONE;
 			}
 			getcontext(((thread*)Queue_top(thread_ReadyQueue))->m_pContext);
 			// Remember to update the current thread;
 			thread* current_thread = (thread*)Queue_top(thread_ReadyQueue);
-			if(current_thread->m_eThreadStatus == eThreadRun)
+			if(current_thread->m_eThreadStatus == eThreadRun ||
+                current_thread->m_eThreadStatus == eThreadNew)
 			{
-			        thread* current_thread = (thread*)Queue_top(thread_ReadyQueue);
+			    thread* current_thread = (thread*)Queue_top(thread_ReadyQueue);
 				current_thread->m_eThreadStatus = eThreadIdle;
 				Queue_pop(thread_ReadyQueue);
 				Queue_push(thread_ReadyQueue,current_thread);
 				thread* next_thread = (thread*)Queue_top(thread_ReadyQueue);
 				int thread_ID = next_thread->m_iID;
-				setcontext(next_thread->m_pContext);
+                //next_thread->m_eThreadStatus = eThreadRun;
+                //printf("Yield from %d to %d\n",current_thread->m_iID,next_thread->m_iID);
+               	setcontext(next_thread->m_pContext);
+                interrupts_set(interrupt_enabled);
 				return thread_ID;
 			}
 			else
 			{
 				current_thread->m_eThreadStatus = eThreadRun;
+                interrupts_set(interrupt_enabled);
 				return current_thread->m_iID;
 			} 
 		}
@@ -215,11 +252,14 @@ thread_yield(Tid want_tid)
 			// TODO: Fix this funciton
 			if(want_tid == ((thread*)Queue_top(thread_ReadyQueue))->m_iID)
 			{
-			        return want_tid;
+                interrupts_set(interrupt_enabled);
+			    return want_tid;
 			}
 			getcontext(((thread*)Queue_top(thread_ReadyQueue))->m_pContext);
+            assert(!interrupts_enabled());
 			thread* current_thread = (thread*)Queue_top(thread_ReadyQueue);
-			if(current_thread->m_eThreadStatus == eThreadRun)
+			if(current_thread->m_eThreadStatus == eThreadRun ||
+                current_thread->m_eThreadStatus == eThreadNew)
 			{
 				// Need to find the right context
 				Single_Linker* temp;
@@ -238,17 +278,20 @@ thread_yield(Tid want_tid)
 				}	     
 				if(want_thread!=NULL)
 				{
-				        thread* current_thread = Queue_top(thread_ReadyQueue);
+				    thread* current_thread = Queue_top(thread_ReadyQueue);
 					current_thread->m_eThreadStatus = eThreadIdle;
 					Queue_pop(thread_ReadyQueue);
 					Queue_movetop(thread_ReadyQueue,position-1);
 					assert(thread_ReadyQueue->m_pEndLinker->m_pNextLinker==NULL);
 					Queue_push(thread_ReadyQueue,current_thread);
+                    //want_thread-> m_eThreadStatus = eThreadRun;
 					setcontext(want_thread->m_pContext);
+                    interrupts_set(interrupt_enabled);
 					return want_thread->m_iID;
 				}
 				else
 				{
+                    interrupts_set(interrupt_enabled);
 					return THREAD_INVALID;
 				}
 								
@@ -256,15 +299,18 @@ thread_yield(Tid want_tid)
 			else
 			{
 				current_thread->m_eThreadStatus = eThreadRun;
+                interrupts_set(interrupt_enabled);
 				return want_tid;
 			}
 		}
 	}
 }
 
+
 Tid
 thread_exit(Tid tid)
 {
+    int interrupt_enabled = interrupts_set(0);
 	if(tid>=0)
 	{
 	      thread* current_thread = (thread*)Queue_top(thread_ReadyQueue);
@@ -287,7 +333,8 @@ thread_exit(Tid tid)
 		}
 		if(exit_thread == NULL)
 		{
-		  return THREAD_INVALID;
+            interrupts_set(interrupt_enabled);
+		    return THREAD_INVALID;
 		}
 		if(current_linker == thread_ReadyQueue->m_pStartLinker)
 		{
@@ -319,6 +366,7 @@ thread_exit(Tid tid)
 		    free(exit_thread->m_pContext);
 			free(exit_thread);
 		}
+        interrupts_set(interrupt_enabled);
 		return return_id;
 	}
 	else
@@ -328,7 +376,10 @@ thread_exit(Tid tid)
 		if(tid == THREAD_ANY)
 		{
 		  if(thread_ReadyQueue->m_iSize == 1)
-		    return THREAD_NONE;
+          {
+              interrupts_set(interrupt_enabled);
+		      return THREAD_NONE;
+          }
 			Single_Linker* prior_linker = NULL;
 			Single_Linker* current_linker = thread_ReadyQueue->m_pStartLinker;
 			for(;current_linker->m_pNextLinker!=NULL;)
@@ -344,7 +395,8 @@ thread_exit(Tid tid)
 			thread_ReadyQueue_index[exit_thread->m_iID] = NULL; 
 			Queue_push(thread_ExitQueue, current_linker->m_pPointer);
 			free(current_linker);
-			return exit_thread->m_iID;
+            interrupts_set(interrupt_enabled);
+		    return exit_thread->m_iID;
 		}
 		// exit itself
 		if(tid == THREAD_SELF)
@@ -371,6 +423,7 @@ thread_exit(Tid tid)
 			  free(current_thread->m_pContext);
 			  free(current_thread->m_pStack);
 			  free(current_thread);
+              interrupts_set(interrupt_enabled);
 			  return THREAD_NONE;
 			}
 			else
@@ -382,52 +435,108 @@ thread_exit(Tid tid)
 				Queue_pop(thread_ReadyQueue);	
 				current_thread = Queue_top(thread_ReadyQueue);
 				setcontext(current_thread->m_pContext);
+                interrupts_set(interrupt_enabled);
 				return destroyed_id;
 			}
 			
 		}
 		else
 		{
+            interrupts_set(interrupt_enabled);
 			return THREAD_INVALID;
 		}
 	}
+    interrupts_set(interrupt_enabled);
 	return THREAD_FAILED;
 }
 
+int thread_free(thread* _thread)
+{
+    if(_thread == NULL)
+        return 0;
+    free(_thread->m_pContext);
+    if(_thread->m_pStack != NULL)
+        free(_thread->m_pStack);
+    free(_thread);
+    return 1;
+}
 /*******************************************************************
  * Important: The rest of the code should be implemented in Lab 3. *
  *******************************************************************/
 
 /* This is the wait queue structure */
+/* use queue as a underlying structure */
 struct wait_queue {
-	/* ... Fill this in ... */
+    Queue* _wait_queue;
 };
+
+typedef struct wait_queue wait_queue;
 
 struct wait_queue *
 wait_queue_create()
 {
 	struct wait_queue *wq;
-
 	wq = malloc(sizeof(struct wait_queue));
+    wq->_wait_queue = Queue_new();
 	assert(wq);
-
-	TBD();
-
 	return wq;
 }
 
 void
 wait_queue_destroy(struct wait_queue *wq)
 {
-	TBD();
+	thread* top;
+    for(;wq->_wait_queue->m_iSize!=0;)
+    {
+        top =(thread*)(Queue_top(wq->_wait_queue));
+        thread_free(top);
+        Queue_pop(wq->_wait_queue);
+    }
+    free(wq->_wait_queue);
 	free(wq);
 }
 
 Tid
 thread_sleep(struct wait_queue *queue)
 {
-	TBD();
-	return THREAD_FAILED;
+  // printf("called sleep\n");
+    int interrupt_enabled = interrupts_set(0);
+    if(queue == NULL)
+    {
+        interrupts_set(interrupt_enabled);
+        return THREAD_INVALID;
+    }
+    if(thread_ReadyQueue->m_iSize == 1)
+    {
+        interrupts_set(interrupt_enabled);
+        return THREAD_NONE;
+    }
+    assert(queue);
+    Single_Linker* tl = thread_ReadyQueue->m_pStartLinker->m_pNextLinker;
+    thread* control_thread = (thread*)(tl->m_pPointer);
+    int control_id = control_thread->m_iID;
+    thread* current_thread = (thread*)(Queue_top(thread_ReadyQueue));
+    //unintr_printf("control: %d Current thread: %d ",control_id,current_thread->m_iID);
+    getcontext(((thread*)(Queue_top(thread_ReadyQueue)))->m_pContext);
+    current_thread = (thread*)(Queue_top(thread_ReadyQueue));
+    if(current_thread->m_eThreadStatus == eThreadRun ||
+        current_thread->m_eThreadStatus == eThreadNew)
+    {
+        Queue_pop(thread_ReadyQueue);
+        current_thread -> m_eThreadStatus = eThreadSleep;
+        Queue_push(queue->_wait_queue,current_thread);
+        thread* next_thread = (thread*)(Queue_top(thread_ReadyQueue));
+        //next_thread -> m_eThreadStatus = eThreadRun;
+        // unintr_printf("Next thread: %d\n",next_thread->m_iID);
+        setcontext(next_thread->m_pContext);
+    }
+    else
+    {
+        if(current_thread -> m_eThreadStatus == eThreadIdle)
+            current_thread -> m_eThreadStatus = eThreadRun;
+    }
+    interrupts_set(interrupt_enabled);
+    return control_id;
 }
 
 /* when the 'all' parameter is 1, wakeup all threads waiting in the queue.
@@ -435,55 +544,95 @@ thread_sleep(struct wait_queue *queue)
 int
 thread_wakeup(struct wait_queue *queue, int all)
 {
-	TBD();
-	return 0;
+    int interrupt_enabled = interrupts_set(0);
+    if(queue == NULL || queue->_wait_queue->m_iSize ==0)
+    {
+        interrupts_set(interrupt_enabled);
+        return 0;
+    }
+    if(all == 1)
+    {
+        Queue* __wait_queue = queue->_wait_queue;
+        int size = __wait_queue->m_iSize;
+        for(;__wait_queue->m_iSize!=0;)
+        {
+            thread* _thread = (thread*)(Queue_top(__wait_queue));
+            _thread->m_eThreadStatus = eThreadIdle;
+            Queue_pop(__wait_queue);
+            Queue_push(thread_ReadyQueue,_thread);
+        }
+        interrupts_set(interrupt_enabled);
+        //printf("Lol\n");
+        return size;
+    }
+    else
+    {
+        Queue* __wait_queue = queue->_wait_queue;
+        thread* _thread = (thread*)(Queue_top(__wait_queue));
+        _thread->m_eThreadStatus = eThreadIdle;
+        Queue_pop(__wait_queue);
+        Queue_push(thread_ReadyQueue,_thread);
+        //printf("lOL\n");
+        interrupts_set(interrupt_enabled);
+        return 1;
+    }
 }
 
 struct lock {
-	/* ... Fill this in ... */
+    thread* m_pLockedThread;
+    eMutexStatus m_eStatus;
+    wait_queue* m_pQueue;
 };
 
 struct lock *
 lock_create()
 {
+    int interrupt_enabled = interrupts_set(0);
 	struct lock *lock;
-
 	lock = malloc(sizeof(struct lock));
+    lock->m_pQueue = wait_queue_create();
+    lock->m_eStatus = eMutexFree;
+    lock->m_pLockedThread = NULL;
 	assert(lock);
-
-	TBD();
-
+    interrupts_set(interrupt_enabled);
 	return lock;
 }
 
 void
 lock_destroy(struct lock *lock)
 {
-	assert(lock != NULL);
-
-	TBD();
-
+    int interrupt_enabled = interrupts_set(0);
+	wait_queue_destroy(lock->m_pQueue);
 	free(lock);
+    interrupts_set(interrupt_enabled);
 }
 
 void
 lock_acquire(struct lock *lock)
 {
-	assert(lock != NULL);
-
-	TBD();
+	int interrupt_enabled = interrupts_set(0);
+    for(;lock->m_eStatus!= eMutexFree;)
+    {
+        thread_sleep(lock->m_pQueue);
+    }
+    lock-> m_pLockedThread = (thread*)(Queue_top(thread_ReadyQueue));
+    lock-> m_eStatus = eMutexLocked;
+    interrupts_set(interrupt_enabled);
 }
 
 void
 lock_release(struct lock *lock)
 {
-	assert(lock != NULL);
-
-	TBD();
+	int interrupt_enabled = interrupts_set(0);
+    lock->m_eStatus = eMutexFree;
+    thread_wakeup(lock->m_pQueue,1);
+    lock->m_pLockedThread = NULL;
+    interrupts_set(interrupt_enabled);
 }
 
 struct cv {
-	/* ... Fill this in ... */
+    thread* m_pCurrentThread;
+    wait_queue* m_pQueue;
 };
 
 struct cv *
@@ -492,10 +641,8 @@ cv_create()
 	struct cv *cv;
 
 	cv = malloc(sizeof(struct cv));
+    cv->m_pQueue = wait_queue_create();
 	assert(cv);
-
-	TBD();
-
 	return cv;
 }
 
@@ -503,37 +650,51 @@ void
 cv_destroy(struct cv *cv)
 {
 	assert(cv != NULL);
-
-	TBD();
-
+    wait_queue_destroy(cv->m_pQueue);
 	free(cv);
 }
 
 void
 cv_wait(struct cv *cv, struct lock *lock)
 {
+    int interrupt_enabled = interrupts_set(0);
 	assert(cv != NULL);
 	assert(lock != NULL);
-
-	TBD();
+    thread* current_thread = (thread*)(Queue_top(thread_ReadyQueue));
+    if(lock->m_pLockedThread == current_thread&& lock->m_eStatus == eMutexLocked)
+    {
+        lock_release(lock);
+        thread_sleep(cv->m_pQueue);
+        lock_acquire(lock);
+    }
+    interrupts_set(interrupt_enabled);
+    return;
 }
 
 void
 cv_signal(struct cv *cv, struct lock *lock)
 {
+    int interrupt_enabled = interrupts_set(0);
 	assert(cv != NULL);
 	assert(lock != NULL);
-
-	TBD();
+    thread* current_thread = (thread*)(Queue_top(thread_ReadyQueue));
+    if(lock->m_pLockedThread == current_thread && lock->m_eStatus == eMutexLocked)
+        thread_wakeup(cv->m_pQueue,0);
+    interrupts_set(interrupt_enabled);
+    return;
 }
 
 void
 cv_broadcast(struct cv *cv, struct lock *lock)
 {
+    int interrupt_enabled = interrupts_set(0);
 	assert(cv != NULL);
 	assert(lock != NULL);
-
-	TBD();
+    thread* current_thread = (thread*)(Queue_top(thread_ReadyQueue));
+    if(lock->m_pLockedThread == current_thread && lock->m_eStatus == eMutexLocked)
+        thread_wakeup(cv->m_pQueue,1);
+    interrupts_set(interrupt_enabled);
+    return;
 }
 
 //////////////////////////////////////////////////////
@@ -599,6 +760,14 @@ int Queue_pop(Queue* _queue)
 {
 	if(_queue == NULL)
 		return 0;
+    if(_queue -> m_iSize == 1)
+    {
+        free(_queue->m_pStartLinker);
+        _queue->m_pStartLinker = NULL;
+        _queue->m_pEndLinker = NULL;
+        _queue->m_iSize -= 1;
+        return 1;
+    }
 	else
 	{
 		Single_Linker* temp = _queue->m_pStartLinker;

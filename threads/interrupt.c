@@ -66,8 +66,10 @@ interrupts_set(int enabled)
 
 	set_signal(&mask);
 	if (enabled) {
+      //printf("enable\n");
 		ret = sigprocmask(SIG_UNBLOCK, &mask, &omask);
 	} else {
+      //printf("disable\n");
 		ret = sigprocmask(SIG_BLOCK, &mask, &omask);
 	}
 	assert(!ret);
@@ -117,6 +119,7 @@ unintr_printf(const char *fmt, ...)
 	va_list args;
 
 	enabled = interrupts_off();
+    // printf("Print\n");
 	va_start(args, fmt);
 	ret = vprintf(fmt, args);
 	va_end(args);
