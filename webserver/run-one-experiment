@@ -32,7 +32,7 @@ rm -f run.out
 while [ $i -le $n ]; do
     ./client -t localhost $1 100 10 $FILESET >> run.out;
     if [ $? -ne 0 ]; then
-	echo "error: client nr $i failed" 1>&2
+	    echo "error: client nr $i failed" 1>&2
 	kill -9 $SERVER_PID 2> /dev/null;
 	sleep 5;
 	exit 1;
